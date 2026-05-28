@@ -49,6 +49,9 @@ async function requestAnalysis({ file, apiKey, useDemo }) {
   if (useDemo) {
     headers["x-demo-mode"] = "true";
   }
+  if (window.location.hostname.endsWith(".vercel.app")) {
+    headers["x-debug"] = "true";
+  }
 
   const response = await fetch("/api/fact-check", {
     method: "POST",
@@ -59,7 +62,11 @@ async function requestAnalysis({ file, apiKey, useDemo }) {
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(payload.error || "Analysis failed.");
+    const details = [payload.error || "Analysis failed."];
+    if (payload.stack) {
+      details.push(payload.stack);
+    }
+    throw new Error(details.join("\n\n"));
   }
 
   return payload.analysis;
