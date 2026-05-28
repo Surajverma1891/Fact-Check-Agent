@@ -1,0 +1,2 @@
+# This submission uses Node.js rather than Python.
+# Runtime dependencies are defined in package.json.

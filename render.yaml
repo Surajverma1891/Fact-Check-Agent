@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: fact-check-agent
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
