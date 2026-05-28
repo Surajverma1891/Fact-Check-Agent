@@ -14,6 +14,10 @@ const ANALYSIS_MODEL = "gemini-2.5-flash";
 const MAX_CLAIMS = 15;
 const VERIFY_BATCH_SIZE = 4;
 const GEMINI_RETRY_DELAYS_MS = [15000, 30000];
+const VERCEL_MAX_CLAIMS = 8;
+const VERCEL_VERIFY_BATCH_SIZE = 8;
+const LOCAL_GEMINI_RETRY_DELAYS_MS = GEMINI_RETRY_DELAYS_MS;
+const VERCEL_GEMINI_RETRY_DELAYS_MS = [4000];
 
 const CLAIM_TYPES = [
   "statistic",
@@ -37,6 +41,38 @@ function asText(value, fallback = "") {
 
   const text = String(value).trim();
   return text || fallback;
+}
+
+function isVercelRuntime() {
+  return (
+    process.env.VERCEL === "1" ||
+    process.env.VERCEL_ENV === "production" ||
+    process.env.VERCEL_ENV === "preview"
+  );
+}
+
+function getGeminiRetryDelays() {
+  return isVercelRuntime() ? VERCEL_GEMINI_RETRY_DELAYS_MS : LOCAL_GEMINI_RETRY_DELAYS_MS;
+}
+
+function getVerifyBatchSize() {
+  return isVercelRuntime() ? VERCEL_VERIFY_BATCH_SIZE : VERIFY_BATCH_SIZE;
+}
+
+function getVerificationDelayMs() {
+  if (isVercelRuntime()) {
+    return 0;
+  }
+
+  return 900;
+}
+
+function getRuntimeClaimLimit() {
+  if (isVercelRuntime()) {
+    return VERCEL_MAX_CLAIMS;
+  }
+
+  return MAX_CLAIMS;
 }
 
 function asConfidence(value) {
@@ -290,6 +326,10 @@ export async function analyzePdfDocument({
     );
   }
 
+  if (isVercelRuntime()) {
+    return runAnalysisCore({ geminiApiKey, groqApiKey, buffer, fileName });
+  }
+
   let releaseQueue;
 
   const previous = analysisQueue;
@@ -300,39 +340,43 @@ export async function analyzePdfDocument({
   await previous;
 
   try {
-    let documentText;
-
-    try {
-      documentText = await extractPdfText(buffer);
-    } catch (error) {
-      throw new FactCheckError(
-        error instanceof Error ? error.message : "Failed to read PDF text.",
-        400,
-      );
-    }
-
-    if (geminiApiKey) {
-      try {
-        const client = new GoogleGenAI({ apiKey: geminiApiKey });
-        return await runGeminiTextAnalysis(client, documentText, fileName, buffer.length);
-      } catch (error) {
-        if (getErrorStatus(error) !== 429 || !groqApiKey) {
-          throw error;
-        }
-      }
-    }
-
-    if (groqApiKey) {
-      return await runGroqTextAnalysis(groqApiKey, documentText, fileName, buffer.length);
-    }
-
-    throw new FactCheckError(
-      "Gemini free-tier quota is exhausted. Add GROQ_API_KEY from https://console.groq.com (free) to .env and restart the server.",
-      429,
-    );
+    return runAnalysisCore({ geminiApiKey, groqApiKey, buffer, fileName });
   } finally {
     releaseQueue();
   }
+}
+
+async function runAnalysisCore({ geminiApiKey, groqApiKey, buffer, fileName }) {
+  let documentText;
+
+  try {
+    documentText = await extractPdfText(buffer);
+  } catch (error) {
+    throw new FactCheckError(
+      error instanceof Error ? error.message : "Failed to read PDF text.",
+      400,
+    );
+  }
+
+  if (geminiApiKey) {
+    try {
+      const client = new GoogleGenAI({ apiKey: geminiApiKey });
+      return await runGeminiTextAnalysis(client, documentText, fileName, buffer.length);
+    } catch (error) {
+      if (getErrorStatus(error) !== 429 || !groqApiKey) {
+        throw error;
+      }
+    }
+  }
+
+  if (groqApiKey) {
+    return await runGroqTextAnalysis(groqApiKey, documentText, fileName, buffer.length);
+  }
+
+  throw new FactCheckError(
+    "Gemini free-tier quota is exhausted. Add GROQ_API_KEY from https://console.groq.com (free) to .env and restart the server.",
+    429,
+  );
 }
 
 function getErrorStatus(error) {
@@ -345,18 +389,24 @@ function getErrorStatus(error) {
 
 async function runGeminiTextAnalysis(client, documentText, fileName, documentSizeBytes) {
   const extracted = await extractClaimsWithGemini(client, documentText);
-  const verified = await verifyClaimsWithGemini(client, extracted.claims);
+  const runtimeClaimLimit = getRuntimeClaimLimit();
+  const selectedClaims = extracted.claims.slice(0, runtimeClaimLimit);
+  const verified = await verifyClaimsWithGemini(client, selectedClaims);
+  const noteSuffix =
+    selectedClaims.length < extracted.claims.length
+      ? ` Vercel fast mode verified ${selectedClaims.length} of ${extracted.claims.length} extracted claims to stay within serverless execution limits.`
+      : "";
 
   return buildFinalAnalysis({
     documentTitle: extracted.document_title,
     documentSummary: extracted.document_summary,
-    extractedClaims: extracted.claims,
+    extractedClaims: selectedClaims,
     verifiedClaims: verified,
     fileName,
     documentSizeBytes,
     extractionModel: ANALYSIS_MODEL,
     verificationModel: ANALYSIS_MODEL,
-    note: "PDF text was read locally, then all claims were extracted and verified with Gemini.",
+    note: `PDF text was read locally, then claims were extracted and verified with Gemini.${noteSuffix}`,
   });
 }
 
@@ -364,18 +414,24 @@ async function runGroqTextAnalysis(groqApiKey, documentText, fileName, documentS
   const extractionModel = getGroqExtractionModelName();
   const verificationModel = getGroqVerificationModelName();
   const extracted = await extractClaimsWithGroq(groqApiKey, documentText);
-  const verified = await verifyClaimsWithGroq(groqApiKey, extracted.claims);
+  const runtimeClaimLimit = getRuntimeClaimLimit();
+  const selectedClaims = extracted.claims.slice(0, runtimeClaimLimit);
+  const verified = await verifyClaimsWithGroq(groqApiKey, selectedClaims);
+  const noteSuffix =
+    selectedClaims.length < extracted.claims.length
+      ? ` Vercel fast mode verified ${selectedClaims.length} of ${extracted.claims.length} extracted claims to stay within serverless execution limits.`
+      : "";
 
   return buildFinalAnalysis({
     documentTitle: extracted.document_title,
     documentSummary: extracted.document_summary,
-    extractedClaims: extracted.claims,
+    extractedClaims: selectedClaims,
     verifiedClaims: verified,
     fileName,
     documentSizeBytes,
     extractionModel: `${extractionModel} (Groq)`,
     verificationModel: `${verificationModel} (Groq)`,
-    note: "PDF text was read locally, then all claims were extracted and verified with Groq.",
+    note: `PDF text was read locally, then claims were extracted and verified with Groq.${noteSuffix}`,
   });
 }
 
@@ -488,8 +544,10 @@ async function verifyClaimsWithGemini(client, extractedClaims) {
   const today = new Date().toISOString().slice(0, 10);
   const claimsWithIds = tagClaimsWithIds(extractedClaims);
   const verifiedClaims = [];
+  const verifyBatchSize = getVerifyBatchSize();
+  const verificationDelayMs = getVerificationDelayMs();
 
-  for (const chunk of chunkArray(claimsWithIds, VERIFY_BATCH_SIZE)) {
+  for (const chunk of chunkArray(claimsWithIds, verifyBatchSize)) {
     const response = await withGeminiRetry(() =>
       client.models.generateContent({
         model: ANALYSIS_MODEL,
@@ -520,7 +578,9 @@ async function verifyClaimsWithGemini(client, extractedClaims) {
       normalizeVerificationPayload(raw, chunk.length),
     );
     verifiedClaims.push(...parsed.claims);
-    await delay(1500);
+    if (verificationDelayMs > 0) {
+      await delay(verificationDelayMs);
+    }
   }
 
   return verifiedClaims;
@@ -530,8 +590,10 @@ async function verifyClaimsWithGroq(groqApiKey, extractedClaims) {
   const today = new Date().toISOString().slice(0, 10);
   const claimsWithIds = tagClaimsWithIds(extractedClaims);
   const verifiedClaims = [];
+  const verifyBatchSize = getVerifyBatchSize();
+  const verificationDelayMs = getVerificationDelayMs();
 
-  for (const chunk of chunkArray(claimsWithIds, VERIFY_BATCH_SIZE)) {
+  for (const chunk of chunkArray(claimsWithIds, verifyBatchSize)) {
     const responseText = await withGroqRetry(() =>
       generateGroqJson({
         apiKey: groqApiKey,
@@ -553,7 +615,9 @@ async function verifyClaimsWithGroq(groqApiKey, extractedClaims) {
       (raw) => normalizeVerificationPayload(raw, chunk.length),
     );
     verifiedClaims.push(...parsed.claims);
-    await delay(3000);
+    if (verificationDelayMs > 0) {
+      await delay(verificationDelayMs);
+    }
   }
 
   return verifiedClaims;
@@ -741,16 +805,17 @@ function createAnalysisId() {
 }
 
 async function withGeminiRetry(operation) {
-  for (let attempt = 0; attempt <= GEMINI_RETRY_DELAYS_MS.length; attempt += 1) {
+  const retryDelays = getGeminiRetryDelays();
+
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
     try {
       return await operation();
     } catch (error) {
-      if (!shouldRetryGeminiError(error) || attempt === GEMINI_RETRY_DELAYS_MS.length) {
+      if (!shouldRetryGeminiError(error) || attempt === retryDelays.length) {
         throw normalizeGeminiError(error);
       }
 
-      const retryAfterMs =
-        getGeminiRetryDelayMs(error) ?? GEMINI_RETRY_DELAYS_MS[attempt] ?? 90000;
+      const retryAfterMs = getGeminiRetryDelayMs(error) ?? retryDelays[attempt] ?? 90000;
       await delay(retryAfterMs);
     }
   }

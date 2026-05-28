@@ -29,6 +29,11 @@ app.post(/.*/, upload.single("file"), async (request, response) => {
 
     response.json({ analysis });
   } catch (error) {
+    // Log the error so Vercel captures a stack trace in deployment logs
+    // This helps diagnose failures when inspecting `vercel logs`.
+    // For safety, only include the full stack in the HTTP response when
+    // the client provides the `x-debug: true` header.
+    console.error(error);
     if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
       response.status(400).json({
         error: "The PDF is too large. Please upload a file up to 20 MB.",
@@ -37,7 +42,18 @@ app.post(/.*/, upload.single("file"), async (request, response) => {
     }
 
     const { statusCode, message } = normalizeHttpError(error);
-    response.status(statusCode).json({ error: message });
+    const payload = { error: message };
+
+    // Attach stack trace when debugging is explicitly requested by the client.
+    try {
+      if (String(request.get("x-debug") || "").toLowerCase() === "true") {
+        payload.stack = error instanceof Error ? error.stack : String(error);
+      }
+    } catch {
+      // ignore header parsing errors
+    }
+
+    response.status(statusCode).json(payload);
   }
 });
 

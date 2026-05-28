@@ -5,12 +5,16 @@
   "outputDirectory": "dist",
   "functions": {
     "api/fact-check.js": {
-      "maxDuration": 60
+      "maxDuration": 300
     }
   },
   "rewrites": [
     {
-      "source": "/(.*)",
+      "source": "/api/fact-check",
+      "destination": "/api/fact-check"
+    },
+    {
+      "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
   ]
