@@ -1,10 +1,9 @@
-import { PDFParse } from "pdf-parse";
+import pdf from "pdf-parse";
 
 const MAX_TEXT_CHARS = 100000;
 
 export async function extractPdfText(buffer) {
-  const parser = new PDFParse({ data: buffer });
-  const result = await parser.getText();
+  const result = await pdf(buffer);
   const text = String(result.text || "")
     .replace(/\r\n/g, "\n")
     .replace(/[ \t]+/g, " ")
